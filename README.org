@@ -1,0 +1,11 @@
+#+TITlE: Gangpile
+
+For when you need to run a script, repeatedly, and at scale.
+
+* Build It
+  1. ~go get~
+  2. Build the bits; order doesn't matter:
+     - ~go build gangpile.go~
+     - ~go build localrunner.go~
+     - ~go build remoterunner.go~ (to be implemented later)
+  3. Get together the script you want to abuse
