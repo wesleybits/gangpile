@@ -2,22 +2,23 @@
 
 For when you need to run a script, repeatedly, and at scale.
 
-* What it does:
+* What It Does
   It spawns multiple subprocesses that run a script or a program repeatedly,
-  ideally without arguments (not implemented yet). These subprocesses cache the
-  standard outputs (stdout and stderr), and stream them back to the gangpile
-  manager. The manager will then put these logs into a SQLite database for you
-  to examine later.
+  ideally without arguments. These subprocesses cache the standard outputs
+  (stdout and stderr), and stream them back to the gangpile manager. The manager
+  will then put these logs into a SQLite database for you to examine later.
   
   At first blush, this may seem to be DDoS tool, and it can certainly be used as
-  one, but it's not actually meant for that. It's for load testing, and a
-  personal exercise in familiarizing myself with Go's standard RPC library.
+  one, but it's not actually meant for that. It's for load testing, annoying
+  your S/O, and as an exercise to better understand Go's concurrency and
+  parallelism options.
 
 * Build It
   1. ~go get~
   2. Build the bits; order doesn't matter:
-     - ~go build -o gangpile gangpile/gangpile.go~
-     - ~go build -o localrunner localrunner/localrunner.go~
+     - ~go build -o bin/gangpile gangpile/gangpile.go~
+     - ~go build -o bin/localrunner localrunner/localrunner.go~
+       - Bonus zshell powerword: ~for p in ("gangpile" "localrunner") go build -o bin/$p $p/$p.go~
   3. Get together the script you want to abuse
      
 * Run It
@@ -26,7 +27,7 @@ For when you need to run a script, repeatedly, and at scale.
      #!/bin/bash 
      # -- naggem.sh --
 
-     # girlfriend is late again... this'll get her attention
+     # girlfriend is late again! this'll get her attention
      curl -XPUT -d'{"text": "ready yet?", "number": "+1888555MYGF"}' https://my.sms.api.fail/send-message
      #+END_SRC
 
@@ -37,11 +38,34 @@ For when you need to run a script, repeatedly, and at scale.
      
   3. Start the program from this directory
      #+BEGIN_SRC sh
-     $ ./gangpile local 12 path/to/naggem.sh
+     $ ./bin/gangpile local 12 path/to/naggem.sh
      #+END_SRC
-     
+
+     - Trivia:
+       - this will spawn 12 executors that will repeatedly hammer ~naggem.sh~
+         until the gangpile process is killed.
+
+       - for best performance, ensure that you have at least 12 sufficiently
+         board CPUs on the computer you are running this on.
+
+       - gangpile will create a "run_logs.db" file. This is SQLite file you can
+         use to examine logs and generate reports.
+
+         - both Python and Racket have SQLite support in their standard library,
+           which means you can use the former to generate attractive graphs and
+           with Jupyter.
+
+         - SQLite ships with most Linux distros, MacOSX, and Android!
+           - Yes, you can run this on your Android phone.
+
+         - It'll gleely add to whatever "run_logs.db" you already have stored
+           here.
+
+       - Twilio didn't like my initial tests, and neither did my (now ex-)
+         girlfriend.
+
   4. ??? 
 
   5. Profit! (or breakup)
-     
+
   6. Press ~Ctrl-C~ to end the gangpile
