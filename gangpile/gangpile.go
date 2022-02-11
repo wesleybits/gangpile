@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/wesleybits/gangpile/database"
@@ -19,8 +18,8 @@ import (
 
 type LineFixer struct {
 	underlying io.Writer
-	newline bool
-	prefix string
+	newline    bool
+	prefix     string
 }
 
 func fix(prefix string, underlying io.Writer) *LineFixer {
@@ -30,22 +29,22 @@ func fix(prefix string, underlying io.Writer) *LineFixer {
 func (lf *LineFixer) Write(bytes []byte) (n int, err error) {
 	const (
 		INLINE = iota
-		ENDLINE
+		NEWLINE
 	)
 
 	chunk := []byte{}
 	state := INLINE
 	if lf.newline {
-		state = ENDLINE
+		state = NEWLINE
 	}
 	for _, b := range bytes {
 		switch state {
 		case INLINE:
 			chunk = append(chunk, b)
 			if b == '\n' {
-				state = ENDLINE
+				state = NEWLINE
 			}
-		case ENDLINE:
+		case NEWLINE:
 			chunk = append(chunk, []byte(lf.prefix)...)
 			chunk = append(chunk, b)
 			state = INLINE
@@ -58,7 +57,7 @@ func (lf *LineFixer) Write(bytes []byte) (n int, err error) {
 
 type WorkerClient struct {
 	server *rpc.Client
-	proc *exec.Cmd
+	proc   *exec.Cmd
 }
 
 func new_local_client(name string) (client WorkerClient, err error) {
