@@ -2,96 +2,64 @@ package database
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
-	"strconv"
 	"sync"
+	"time"
 
-	_ "github.com/mattn/sqlite-3"
 	"github.com/wesleybits/gangpile/protocol"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-func is_digit(c rune) bool {
-	return c >= '0' && c <= '9'
+const logs_file = "run_logs.db"
+
+//////////////////
+// The DB Model //
+//////////////////
+
+type Run struct {
+	gorm.Model
+	Worker     string
+	Scriptfile string
+	StartedAt  time.Time
+	EndedAt    time.Time
+	StdoutLog  []StdoutLine `gorm:"foreignKey:RunsId"`
+	StderrLog  []StderrLine `gorm:"foriengKey:RunsId"`
 }
 
-func worker_idx(workername string) (idx int, err error) {
-	const (
-		CHAR = iota
-		DIGIT
-	)
-
-	number := ""
-	state := CHAR
-	for _, c := range workername {
-		switch state {
-		case CHAR:
-			if is_digit(c) {
-				state = DIGIT
-				number += string(c)
-			}
-		case DIGIT:
-			if is_digit(c) {
-				number += string(c)
-			} else {
-				state = CHAR
-				number = ""
-			}
-		}
-	}
-	idx, err = strconv.Atoi(number)
-	return
+type StdoutLine struct {
+	gorm.Model
+	RunId int64
+	Line  string
 }
+
+type StderrLine struct {
+	gorm.Model
+	RunId int64
+	Line  string
+}
+
+/////////////////////////////////////
+// High-level Logging DB Interface //
+/////////////////////////////////////
 
 type Database struct {
-	dbfile string
-	db *sql.DB
-	ctx context.Context
-	records chan *protocol.Report
-	stop context.CancelFunc
+	dbfile     string
+	db         *gorm.DB
+	ctx        context.Context
+	records    chan *protocol.Report
 	wait_group sync.WaitGroup
 }
 
 func (db *Database) init() (err error) {
-	_, err = db.db.Exec(`
-create table Runs (
-	runid uint not null,
-	worker uint not null,
-	script text not null,
-	started datetime not null,
-	ended datetime not null,
-	primary key (runid, worker)
-)`)
-	if err != nil {
-		fmt.Printf("DB ERROR: %s\n", err.Error())
+	if db.db, err = gorm.Open(sqlite.Open(logs_file), &gorm.Config{}); err != nil {
 		return
 	}
 
-	_, err = db.db.Exec(`
-create table StdoutLogs (
-	lineid uint not null,
-	runid uint not null,
-	worker uint not null,
-	line text not null,
-	primary key (lineid, runid, worker)
-)`)
-	if err != nil {
-		fmt.Printf("DB ERROR: %s\n", err.Error())
-		return
-	}
+	// GORM comes with a migration tool!
+	db.db.AutoMigrate(&StdoutLine{}, &StderrLine{}, &Run{})
 
-	_, err = db.db.Exec(`
-create table StderrLogs (
-	lineid uint not null,
-	runid uint not null,
-	worker uint not null,
-	line text not null,
-	primary key (lineid, runid, worker)
-)`)
-	if err != nil {
-		fmt.Printf("DB ERROR: %s\n", err.Error())
-	}
 	return
 }
 
@@ -101,90 +69,66 @@ func log_error(prefix string, e error) {
 	}
 }
 
+// Because SQLite is hilariously bad a concurrency management, we'll only be
+// inserting records one batch at a time.
 func (db *Database) work_loop() {
 	for true {
 		select {
-		case report := <- db.records:
-			worker, err := worker_idx(report.WorkerName)
-			if err != nil {
-				fmt.Printf("DB report error (worker index from name): %s\n", err.Error())
-				continue
-			}
-			max_runids, err := db.db.Query("select max(runid) from Runs where worker = ?", worker)
-			last_runid := 0
-			for max_runids.Next() {
-				max_runids.Scan(&last_runid)
-			}
-			max_runids.Close()
-
-			for i, run := range report.Runs {
-				runid := last_runid + i + 1
-				started := run.StartTime
-				ended := run.EndTime
-				script := run.Scriptfile
-				_, err := db.db.Exec(
-					"insert into Runs (runid, worker, script, started, ended) values (?, ?, ?, ?, ?)",
-					runid,
-					worker,
-					script,
-					started,
-					ended)
-				log_error("ERROR on 'insert Runs': ", err)
-
-				insert_stdout, err := db.db.Prepare("insert into StdoutLogs (lineid, runid, worker, line) values (?, ?, ?, ?)")
-				log_error("ERROR preparing 'insert StdoutLogs'", err)
-
-				insert_stderr, err := db.db.Prepare("insert into StderrLogs (lineid, runid, worker, line) values (?, ?, ?, ?)")
-				log_error("ERROR preparing 'insert StderrLogs'", err)
-
-				for i, line := range run.Stdout {
-					_, err := insert_stdout.Exec(i, runid, worker, line)
-					log_error("ERROR running 'insert StdoutLogs': ", err)
+		case report := <-db.records:
+			for _, run := range report.Runs {
+				run_model := Run{
+					Worker:     report.WorkerName,
+					Scriptfile: run.Scriptfile,
+					StartedAt:  run.StartTime,
+					EndedAt:    run.EndTime,
+					StdoutLog:  []StdoutLine{},
+					StderrLog:  []StderrLine{},
 				}
-
-				for i, line := range run.Stderr {
-					_, err := insert_stderr.Exec(i, runid, worker, line)
-					log_error("ERROR on 'insert StdoutLogs': ", err)
+				for _, stdout := range run.Stdout {
+					run_model.StdoutLog = append(run_model.StdoutLog, StdoutLine{Line: stdout})
 				}
-				insert_stdout.Close()
-				insert_stderr.Close()
+				for _, stderr := range run.Stderr {
+					run_model.StderrLog = append(run_model.StderrLog, StderrLine{Line: stderr})
+				}
+				db.db.Create(&run_model)
 			}
 		case <-db.ctx.Done():
-			db.db.Close()
+			db.wait_group.Done()
 			return
+		default:
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }
 
-func NewDatabase(file string) (db *Database, err error) {
+// You'll only need to call this once. needs a cancel-able context to know when
+// to stop running. Once canceled, you'll need to call (*Database).Drain() to
+// wait until all the inserts are finished.
+func NewDatabase(ctx context.Context, file string) (db *Database, err error) {
 	if _, _err := os.Stat(file); !os.IsNotExist(_err) {
 		err = fmt.Errorf("File already exists; please move or remove.")
-		return
-	}
-	if _db, _err := sql.Open("sqlite3", file); _err != nil {
-		err = fmt.Errorf("Error while creating db file: %s", _err.Error())
-		return
 	} else {
 		db = &Database{
-			db: _db,
-			dbfile: file,
+			dbfile:  file,
 			records: make(chan *protocol.Report, 10),
+			ctx:     ctx,
 		}
-		db.ctx, db.stop = context.WithCancel(context.Background())
+		db.init()
 		db.wait_group.Add(1)
-		go func() {
-			db.work_loop()
-			db.wait_group.Done()
-		}
-		return
+		go db.work_loop()
 	}
+	return
 }
 
+// Nonblocking missive to save a report, because we in a hurry and actually
+// performing the insert is a sombody-else problem (see (*Database).work_loop
+// for what that "somebody-else" is).
 func (db *Database) SaveReport(r *protocol.Report) {
 	db.records <- r
 }
 
-func (db *Database) Close() {
-	db.stop()
+// call after canceling the given context. this waits until the DB is finished
+// with all it's queued inserts.
+func (db *Database) Drain() {
 	db.wait_group.Wait()
 }

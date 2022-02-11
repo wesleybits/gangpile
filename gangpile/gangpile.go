@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/wesleybits/gangpile/database"
@@ -116,10 +117,10 @@ func go_local(num int, script string) (clients []WorkerClient) {
 	clients = []WorkerClient{}
 
 	for i := 0; i < num; i++ {
-		workername := fmt.Sprintf("%s_%d", name, i)
+		workername := fmt.Sprintf("%s[%d]", name, i)
 		prefix := fmt.Sprintf("%s: ", workername)
 		sockname := fmt.Sprintf("/tmp/%s.sock", name)
-		proc = exec.Command("./localrunner", workername)
+		proc = exec.Command("./bin/localrunner", workername)
 		proc.Stdout = fix(prefix, os.Stdout)
 		proc.Stderr = fix(prefix, os.Stderr)
 		if err = proc.Run(); err != nil {
@@ -153,6 +154,8 @@ func main() {
 
 	var clients []WorkerClient
 	var script string
+	var wg sync.WaitGroup
+
 	switch os.Args[1] {
 	case "local":
 		if num_workers, err := strconv.Atoi(os.Args[2]); err != nil {
@@ -185,8 +188,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, stop_pollers := context.WithCancel(context.Background())
-	db, err := database.NewDatabase("runs_results.db")
+	ctx, stop := context.WithCancel(context.Background())
+	db, err := database.NewDatabase(ctx, "runs_results.db")
 	if err != nil {
 		fmt.Printf("Initialization error (starting database): %s\n", err.Error())
 		os.Exit(10)
@@ -196,8 +199,10 @@ func main() {
 		if !client.start(script) {
 			fmt.Printf("Worker %d failed to start; bad script path or already running.\n", i)
 		}
+
 	}
 
+	wg.Add(1)
 	go func() {
 		for true {
 			time.Sleep(1 * time.Second)
@@ -207,6 +212,7 @@ func main() {
 					fmt.Printf("Stopping worker %d\n", i)
 					db.SaveReport(client.stop())
 				}
+				wg.Done()
 				return
 			default:
 				for _, client := range clients {
@@ -216,14 +222,15 @@ func main() {
 		}
 	}()
 
+	// wait for SYSINT or SYSKILL, then cleanup and halt
 	syssigs := make(chan os.Signal)
 	signal.Notify(syssigs, os.Interrupt)
 	signal.Notify(syssigs, os.Kill)
-
 	<-syssigs
 
-	stop_pollers()
-	db.Close()
+	stop()
+	wg.Wait()
+	db.Drain()
 
 	fmt.Printf("Done\n")
 }

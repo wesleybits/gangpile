@@ -2,4 +2,7 @@ module github.com/wesleybits/gangpile
 
 go 1.17
 
-require github.com/mattn/go-sqlite3 v1.14.11 // indirect
+require (
+	gorm.io/driver/sqlite v1.2.6 // indirect
+	gorm.io/gorm v1.22.5 // indirect
+)
