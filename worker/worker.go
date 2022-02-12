@@ -10,6 +10,7 @@ import (
 	"net/rpc"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
 	"time"
 
@@ -18,14 +19,23 @@ import (
 
 type Worker struct {
 	scriptfile string
-	context context.Context
-	stop context.CancelFunc
-	runs []protocol.RunResults
-	name string
-	socket string
-	listener net.Listener
-	lock *sync.Mutex
-	running bool
+	context    context.Context
+	stop       context.CancelFunc
+	runs       []protocol.RunResults
+	name       string
+	socket     string
+	listener   net.Listener
+	lock       *sync.Mutex
+	waiter     *sync.WaitGroup
+	running    bool
+}
+
+// this and cleanup_tcp are to be called in a sigtrap, after receiving an
+// interrupt or kill signal, and before actually stopping. these are cleanup
+// procedures.
+func cleanup_uds(w *Worker) {
+	w.listener.Close()
+	os.Remove(w.socket)
 }
 
 func NewUDSWorker(name string) (worker *Worker, err error) {
@@ -40,29 +50,53 @@ func NewUDSWorker(name string) (worker *Worker, err error) {
 		return
 	}
 	worker = &Worker{
-		name: name,
-		socket: socketname,
+		name:     name,
+		socket:   socketname,
 		listener: listener,
-		lock: new(sync.Mutex),
-		running: false,
+		lock:     new(sync.Mutex),
+		running:  false,
 	}
 	err = nil
+
+	go func() {
+		syssig := make(chan os.Signal)
+		signal.Notify(syssig, os.Kill, os.Interrupt)
+		<-syssig
+		cleanup_uds(worker)
+		os.Exit(0)
+	}()
+
 	return
+}
+
+func cleanup_tcp(w *Worker) {
+	w.listener.Close()
 }
 
 func NewTCPWorker(name, port string) (worker *Worker, err error) {
 	var listener net.Listener
 	if listener, err = net.Listen("tcp", fmt.Sprintf(":%s", port)); err != nil {
 		err = fmt.Errorf("Cannot open TCP on %s: %s", port, err.Error())
+		return
 	}
 	worker = &Worker{
-		name: name,
-		socket: port,
+		name:     name,
+		socket:   port,
 		listener: listener,
-		lock: new(sync.Mutex),
-		running: false,
+		lock:     new(sync.Mutex),
+		running:  false,
+		waiter:   new(sync.WaitGroup),
 	}
 	err = nil
+
+	go func() {
+		syssig := make(chan os.Signal)
+		signal.Notify(syssig, os.Kill, os.Interrupt)
+		<-syssig
+		cleanup_tcp(worker)
+		os.Exit(0)
+	}()
+
 	return
 }
 
@@ -135,11 +169,14 @@ func (w *Worker) Start(script string, ok *bool) {
 		*ok = false
 		return
 	}
+	w.lock.Lock()
 	w.scriptfile = script
 	w.context, w.stop = context.WithCancel(context.Background())
 	w.runs = []protocol.RunResults{}
+	w.waiter.Add(1)
 	go w.work_loop()
 	w.running = true
+	w.lock.Unlock()
 	*ok = true
 	return
 }
@@ -149,15 +186,12 @@ func (w *Worker) Stop(code int, result *protocol.Report) {
 	if !w.running {
 		return
 	}
+
 	w.stop()
-	w.lock.Lock()
+	w.waiter.Wait()
 	result.WorkerName = w.name
 	result.Runs = w.runs
-	w.listener.Close()
-	go func() {
-		time.Sleep(1 * time.Second)
-		os.Exit(0)
-	}()
+	w.context, w.stop = context.WithCancel(context.Background())
 }
 
 // get a worker report, and clear it's cache of prior runs
