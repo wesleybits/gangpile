@@ -18,9 +18,9 @@ For when you need to run a script, repeatedly, and at scale.
   2. Build the bits; order doesn't matter:
      - ~go build -o bin/gangpile gangpile/gangpile.go~
      - ~go build -o bin/localrunner localrunner/localrunner.go~
-       - Bonus zshell powerword: ~for p in ("gangpile" "localrunner") go build -o bin/$p $p/$p.go~
+       - Bonus zsh powerword: ~for p ('gangpile' 'localrunner') go build -o bin/$p $p/$p.go~
   3. Get together the script you want to abuse
-     
+
 * Run It
   1. Get together an idempotent script like this one:
      #+BEGIN_SRC sh
@@ -46,7 +46,7 @@ For when you need to run a script, repeatedly, and at scale.
          until the gangpile process is killed.
 
        - for best performance, ensure that you have at least 12 sufficiently
-         board CPUs on the computer you are running this on.
+         bored CPUs on the computer you are running this on.
 
        - gangpile will create a "run_logs.db" file. This is SQLite file you can
          use to examine logs and generate reports.
