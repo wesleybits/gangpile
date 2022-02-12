@@ -127,7 +127,7 @@ func go_local(num int, script string) (clients []WorkerClient) {
 			fmt.Printf("Could not start worker %d: %s\n", i, err.Error())
 			continue
 		}
-		for true {
+		for {
 			if _, err = os.Stat(sockname); os.IsNotExist(err) {
 				time.Sleep(10 * time.Microsecond)
 			} else {
@@ -189,6 +189,7 @@ func main() {
 	}
 
 	ctx, stop := context.WithCancel(context.Background())
+
 	db, err := database.NewDatabase(ctx, "runs_results.db")
 	if err != nil {
 		fmt.Printf("Initialization error (starting database): %s\n", err.Error())
@@ -197,21 +198,24 @@ func main() {
 
 	for i, client := range clients {
 		if !client.start(script) {
-			fmt.Printf("Worker %d failed to start; bad script path or already running.\n", i)
+			fmt.Printf("Worker %d failed to start, bad script path, or already running; killing it anyway.\n", i)
 		}
-
 	}
 
 	wg.Add(1)
+
+	// poll runlogs
 	go func() {
-		for true {
+		for {
 			time.Sleep(1 * time.Second)
 			select {
 			case <-ctx.Done():
 				for i, client := range clients {
 					fmt.Printf("Stopping worker %d\n", i)
 					db.SaveReport(client.stop())
+					client.kill()
 				}
+				db.Drain()
 				wg.Done()
 				return
 			default:
@@ -222,15 +226,12 @@ func main() {
 		}
 	}()
 
-	// wait for SYSINT or SYSKILL, then cleanup and halt
 	syssigs := make(chan os.Signal)
-	signal.Notify(syssigs, os.Interrupt)
-	signal.Notify(syssigs, os.Kill)
+	signal.Notify(syssigs, os.Interrupt, os.Kill)
 	<-syssigs
 
 	stop()
 	wg.Wait()
-	db.Drain()
 
 	fmt.Printf("Done\n")
 }
